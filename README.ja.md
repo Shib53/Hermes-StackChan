@@ -170,6 +170,7 @@ STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
 STACKCHAN_MIN_FRAMES_FOR_STT=10
 STACKCHAN_POST_TTS_COOLDOWN_MS=1000
+STACKCHAN_RECENT_TTS_ECHO_WINDOW_MS=8000
 STACKCHAN_LOCAL_VAD_ENABLED=true
 STACKCHAN_VAD_RMS_THRESHOLD=0.025
 STACKCHAN_VAD_START_SPEECH_MS=60
@@ -200,7 +201,7 @@ STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 `HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。`STACKCHAN_LOCAL_TTS_URL` を設定すると、`ai-server` はUTF-8テキストを常駐ローカルendpointへ直接POSTし、WAV応答を受け取ります。segmentごとのHermes/Python helper起動がなくなります。Piper Plusの `piper.http_server` はこの経路と互換です。
 `STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=true` にすると、`ai-server` は TTS turn ごとに指定名の PipeWire sink を探します。接続中ならホスト側スピーカーから発話し、その間だけM5スピーカーをmuteします。M5には同期用のOpus frameを送り続けるため、顔と発話状態は連動します。sinkが見つからない、または初期化に失敗した場合は `STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME` のM5内蔵スピーカーへ自動フォールバックします。BluetoothスピーカーをStackChan背後に置く構成で有効です。
 常時稼働の低スペック端末では `STACKCHAN_HERMES_WARMUP_ENABLED=true` にすると、device WebSocket listenerを開く前に最小限の非表示プロンプトを1回送ります。providerのcold start待ちをservice起動時へ移せます。待機は `STACKCHAN_HERMES_WARMUP_TIMEOUT_MS` で上限を設け、失敗しても `ai-server` 自体は起動します。
-local VAD は低遅延の M5Stack 経路で default on です。入力 Opus は session ごとの disposable decoder で復号し、一時的な decode 失敗では decoder を作り直します。連続失敗した場合だけ arrival-gap timeout に退避するため、1つの壊れた frame が TTS encoder まで巻き込む状態を避けます。`STACKCHAN_VAD_END_SILENCE_MS` は遅延と早切れの主な調整点で、自然な日本語会話では 600-750 ms 程度が実用範囲です。
+local VAD は低遅延の M5Stack 経路で default on です。入力 Opus は session ごとの disposable decoder で復号し、一時的な decode 失敗では decoder を作り直します。連続失敗した場合だけ arrival-gap timeout に退避するため、1つの壊れた frame が TTS encoder まで巻き込む状態を避けます。`STACKCHAN_VAD_END_SILENCE_MS` は遅延と早切れの主な調整点で、自然な日本語会話では 600-750 ms 程度が実用範囲です。`STACKCHAN_POST_TTS_COOLDOWN_MS` の間は通常のマイク frame を破棄して capture state をリセットします。さらに `STACKCHAN_RECENT_TTS_ECHO_WINDOW_MS` の間は StackChan が直前に発話した内容と一致する STT transcript を拒否し、自己応答 loop を二重に防ぎます。この保護を意図的に無効化する場合だけ `0` に設定してください。
 
 barge-in は、M5 マイクが自分のスピーカーを拾いやすい物理音響経路のため default off のままです。TTS は文単位に分けて合成するため、長い返答でも全文合成を待たずに先頭文から再生を始められます。`STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS` は発話セグメント上限に達した時点で専用 Hermes stream を interrupt し、長さ指定の聞き違いで音声 loop が長時間占有されるのを防ぎます。`STACKCHAN_TTS_PREROLL_MS` は最初の有声音声 frame の前に無音 Opus を送って、実機スピーカーで冒頭音節が欠けるのを避けるための設定です。実機スピーカーの立ち上がりで頭が欠ける場合は 450-600 ms 程度が調整範囲です。`STACKCHAN_TTS_OUTPUT_GAIN` は Opus encode 前の合成音声 PCM を下げ、小型 M5Stack スピーカーでの音割れを避けるための設定です。`STACKCHAN_OPUS_PCM_INPUT=buffer` は guarded OpusScript heap-copy encoder を使います。`int16` は legacy public OpusScript encode path の実機 A/B 診断用にだけ使ってください。`STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD` は非常に小さい音量の最長録音 fallback を STT 前に捨て、無音 hallucination が誤返答になるのを防ぎます。`STACKCHAN_FAST_ACK_TEXTS` は複数の短い相づちを事前キャッシュし、STT直後にランダムに再生することで毎回同じ第一声になるのを避けます。
 

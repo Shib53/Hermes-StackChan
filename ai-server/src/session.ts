@@ -237,6 +237,7 @@ const STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS = readEnvBool('STACKCHAN_STOP_LLM_AFTER
 const MAX_DURATION_STT_RMS_THRESHOLD = readEnvFloat('STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD', 0.006, 0, 0.2)
 const STREAMING_DECODE_FAILURE_LIMIT = readEnvInt('STACKCHAN_STREAMING_DECODE_FAILURE_LIMIT', 3, 1, 20)
 const BARGE_IN_DECODE_FAILURE_LIMIT = readEnvInt('STACKCHAN_BARGE_IN_DECODE_FAILURE_LIMIT', 3, 1, 20)
+const RECENT_TTS_ECHO_WINDOW_MS = readEnvInt('STACKCHAN_RECENT_TTS_ECHO_WINDOW_MS', 8000, 0, 30000)
 const DEFAULT_IGNORED_SHORT_TRANSCRIPTS = new Set([
     'あ', 'あっ', 'あー',
     'え', 'えっ', 'えー',
@@ -274,6 +275,13 @@ function normalizedShortTranscript(text: string): string {
         .trim()
         .replace(/[、。！？!?\s]/g, '')
         .replace(/[ー〜~]+$/g, 'ー')
+}
+
+function normalizedEchoText(text: string): string {
+    return stripMediaForSpeech(text)
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/[\p{P}\p{S}\s]+/gu, '')
 }
 
 export function isIgnorableShortTranscript(text: string): boolean {
@@ -421,6 +429,8 @@ export class Session {
     private fastAckEntries?: FastAckCacheEntry[]
     private fastAckFailed = false
     private lastFastAckIndex = -1
+    private recentSpokenText = ''
+    private recentSpokenAt = 0
     private closed = false
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
@@ -500,6 +510,7 @@ export class Session {
         }
 
         if (this.state !== 'listening') return
+        if (Date.now() < this.cooldownUntil) return
         this.handleListeningPayload(payload)
     }
 
@@ -772,6 +783,9 @@ export class Session {
 
         if (type === 'hello') {
             this.version = (msg['version'] as number | undefined) ?? 3
+            this.state = 'idle'
+            this.resetCapture()
+            this.setAutoLedState('idle')
             this.sendJson({
                 type: 'hello',
                 transport: 'websocket',
@@ -792,6 +806,7 @@ export class Session {
                 const mode = String(msg['mode'] ?? '')
                 const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${mode}`
                 if (!isWakeWordStart) this.lastListenMode = mode
+                if (isWakeWordStart) this.cooldownUntil = 0
                 if (!isWakeWordStart && Date.now() < this.cooldownUntil) {
                     if (this.state === 'listening') {
                         console.log(`[session ${this.sessionId}] listen start already active (${source})`)
@@ -873,6 +888,11 @@ export class Session {
             this.resumeListeningAfterIgnoredInput('empty-transcript')
             return
         }
+        if (this.isRecentTtsEcho(text)) {
+            console.log(`[session ${this.sessionId}] ignored recent TTS echo: "${text}"`)
+            this.resumeListeningAfterIgnoredInput('recent-tts-echo')
+            return
+        }
         if (isIgnorableShortTranscript(text)) {
             console.log(`[session ${this.sessionId}] ignored short transcript: "${text}"`)
             this.resumeListeningAfterIgnoredInput('ignored-short-transcript')
@@ -895,7 +915,24 @@ export class Session {
 
     private resumeListeningAfterIgnoredInput(source: string): void {
         if (this.state !== 'processing' || this.closed) return
+        this.state = 'idle'
+        this.setAutoLedState('idle')
+        if (Date.now() < this.cooldownUntil) {
+            this.delayListeningUntilCooldownEnds(source)
+            return
+        }
         this.startListening(source)
+    }
+
+    private isRecentTtsEcho(text: string): boolean {
+        if (RECENT_TTS_ECHO_WINDOW_MS <= 0 || !this.recentSpokenText) return false
+        if (Date.now() - this.recentSpokenAt > RECENT_TTS_ECHO_WINDOW_MS) return false
+        const transcript = normalizedEchoText(text)
+        const spoken = normalizedEchoText(this.recentSpokenText)
+        if (!transcript || !spoken) return false
+        return transcript === spoken ||
+            (transcript.length >= 6 && spoken.includes(transcript)) ||
+            (spoken.length >= 6 && transcript.includes(spoken))
     }
 
     async enqueueFollowup(prompt: string): Promise<void> {
@@ -1166,6 +1203,8 @@ export class Session {
     private startTtsPlayback(label: string): TtsPlayback {
         const generation = this.ttsGeneration + 1
         this.ttsGeneration = generation
+        this.recentSpokenText = ''
+        this.recentSpokenAt = 0
         this.ttsStopSent = false
         this.ttsStreaming = true
         this.ttsStartedAt = Date.now()
@@ -1273,6 +1312,7 @@ export class Session {
             return
         }
         playback.segmentCount += 1
+        this.rememberSpokenSegment(segment)
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
     }
 
@@ -1311,7 +1351,15 @@ export class Session {
             return
         }
         playback.segmentCount += 1
+        this.rememberSpokenSegment(segment)
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private rememberSpokenSegment(segment: string): void {
+        this.recentSpokenText = this.recentSpokenText
+            ? `${this.recentSpokenText}\n${segment}`
+            : segment
+        this.recentSpokenAt = Date.now()
     }
 
     private async prepareLocalTtsOutput(playback: TtsPlayback): Promise<void> {
@@ -1383,6 +1431,7 @@ export class Session {
         if (!playback.interrupted && this.state === 'processing' && this.ttsGeneration === playback.generation) {
             // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
             this.cooldownUntil = Date.now() + this.postTtsCooldownMs
+            this.resetCapture()
         }
         await this.restoreM5SpeakerAfterLocalOutput(playback)
     }

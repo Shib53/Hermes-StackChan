@@ -429,6 +429,61 @@ test('Session delays auto listen start during post-TTS cooldown and drops cooldo
     session.close()
 })
 
+test('Session initializes automatic LED to idle on hello', () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        hermes: {
+            submitPrompt: async () => 'unused',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+
+    assert.deepEqual(mcpParams(ledMcpMessages(ws)[0])['arguments'], { red: 0, green: 0, blue: 0 })
+    session.close()
+})
+
+test('Session ignores a transcript matching its recently spoken reply', async () => {
+    const ws = new MockWebSocket()
+    const transcripts = ['最初の質問', 'これは返答です']
+    const prompts: string[] = []
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        postTtsCooldownMs: 0,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => transcripts[transcribeCount++] ?? '',
+        hermes: {
+            submitPrompt: async (prompt) => {
+                prompts.push(prompt)
+                return 'これは返答です。'
+            },
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+    await waitFor(() => session.getBridgeStatus().state === 'listening')
+
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => transcribeCount === 2)
+
+    assert.deepEqual(prompts, ['最初の質問'])
+    assert.equal(jsonMessages(ws).filter((msg) => msg['type'] === 'stt').length, 1)
+    session.close()
+})
+
 test('Session displays Hermes image media and strips image tags before TTS', async () => {
     const ws = new MockWebSocket()
     const session = new Session(ws as never, {
@@ -732,7 +787,11 @@ test('Session auto LED follows listen and speaking states', async () => {
 
     session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
-    assert.deepEqual(mcpParams(ledMcpMessages(ws)[0])['arguments'], { red: 0, green: 32, blue: 0 })
+    const initialLedStates = ledMcpMessages(ws).map((msg) => mcpParams(msg)['arguments'])
+    assert.deepEqual(initialLedStates, [
+        { red: 0, green: 0, blue: 0 },
+        { red: 0, green: 32, blue: 0 },
+    ])
     for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
     await waitFor(() => ledMcpMessages(ws).some((msg) => {
